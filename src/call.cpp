@@ -596,6 +596,34 @@ void DarlingServer::Call::ThreadGetSpecialReplyPort::processCall() {
 	_sendReply(0, dtape_thread_get_special_reply_port());
 };
 
+void DarlingServer::Call::FileportMakeport::processCall() {
+	int code = 0;
+	uint32_t name = 0;
+
+	// the descriptor in the request is ours to keep; it is handed to the fileport on success
+	int fd = _body.fd;
+	name = dtape_fileport_makeport(fd);
+
+	if (name == 0) {
+		close(fd);
+		code = -ENOMEM;
+	}
+
+	_sendReply(code, name);
+};
+
+void DarlingServer::Call::FileportMakefd::processCall() {
+	int code = 0;
+	int fd = dtape_fileport_makefd(_body.port_name);
+
+	if (fd < 0) {
+		code = -EINVAL;
+	}
+
+	// the reply takes ownership of the new descriptor
+	_sendReply(code, fd);
+};
+
 void DarlingServer::Call::MkTimerCreate::processCall() {
 	_sendReply(0, dtape_mk_timer_create());
 };

@@ -28,6 +28,17 @@ uint32_t dtape_mach_reply_port(void);
 uint32_t dtape_thread_get_special_reply_port(void);
 uint32_t dtape_mk_timer_create(void);
 
+/**
+ * Creates a fileport for `fd` in the current task and returns its name (or MACH_PORT_NULL on failure).
+ * Takes ownership of `fd` only when it succeeds.
+ */
+uint32_t dtape_fileport_makeport(int fd);
+
+/**
+ * Returns a new descriptor (owned by the caller) for the fileport named `port_name` in the current task, or -1.
+ */
+int dtape_fileport_makefd(uint32_t port_name);
+
 DSERVER_DTAPE_DECLS;
 
 typedef void (*dtape_kqchan_mach_port_notification_callback_f)(void* context);

@@ -269,6 +269,22 @@ calls = [
 	]),
 
 	#
+	# fileports
+	#
+
+	('fileport_makeport', [
+		('fd', '@fd'),
+	], [
+		('port_name', 'uint32_t'),
+	]),
+
+	('fileport_makefd', [
+		('port_name', 'uint32_t'),
+	], [
+		('fd', '@fd'),
+	]),
+
+	#
 	# pthread cancelation
 	#
 
