@@ -795,6 +795,54 @@ kern_return_t mach_vm_machine_attribute(vm_map_t map, mach_vm_address_t addr, ma
 	dtape_stub_unsafe();
 };
 
+/**
+ * Implements `mach_vm_map` with a null memory-object port: zero-filled anonymous memory, allocated in the target
+ * process through the same remote mmap path as `mach_vm_allocate`.
+ *
+ * `offset` is irrelevant without a memory object and is ignored, and `inheritance` is not applied (see
+ * docs/memory-entry.md).
+ */
+static kern_return_t dtape_vm_map_anonymous(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t initial_size, mach_vm_offset_t mask, int flags, vm_prot_t cur_protection, vm_prot_t max_protection) {
+	uint64_t page_size = dtape_host_page_size();
+	uint64_t page_mask = page_size - 1;
+	bool fixed = !(flags & VM_FLAGS_ANYWHERE);
+	dtape_memory_flags_t memflags = dtape_memory_flag_none;
+	uint64_t map_size;
+	uintptr_t result;
+
+	if (initial_size == 0 || initial_size > (uint64_t)INT64_MAX - page_mask || (fixed && (*address & page_mask) != 0)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if ((cur_protection & ~VM_PROT_ALL) || (max_protection & ~VM_PROT_ALL) || (cur_protection & ~max_protection)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (!fixed && (mask & ~page_mask) != 0) {
+		// alignment beyond a page can't be requested from the remote mmap
+		dtape_stub_safe("alignment mask larger than a page");
+		return KERN_NOT_SUPPORTED;
+	}
+
+	map_size = (initial_size + page_mask) & ~page_mask;
+
+	if (fixed) {
+		memflags |= dtape_memory_flag_fixed;
+		if (flags & VM_FLAGS_OVERWRITE) {
+			memflags |= dtape_memory_flag_overwrite;
+		}
+	}
+
+	result = dtape_hooks->task_allocate_pages(target_map->dtape_task->context, map_size / page_size, dtape_vm_prot_to_linux(cur_protection), fixed ? *address : 0, memflags);
+	if (!result) {
+		// the hook doesn't report errno, so a fixed mapping that collides with an existing one can't be told apart from other failures
+		return fixed ? KERN_NO_SPACE : KERN_RESOURCE_SHORTAGE;
+	}
+
+	*address = result;
+	return KERN_SUCCESS;
+};
+
 kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t initial_size, mach_vm_offset_t mask, int flags, ipc_port_t port, vm_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance) {
 	kern_return_t kr = KERN_SUCCESS;
 	uint64_t page_size = dtape_host_page_size();
@@ -814,10 +862,7 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 	}
 
 	if (!IP_VALID(port)) {
-		// STUB: anonymous mappings (null port) are not implemented; this keeps the previous behavior of reporting
-		//       success without mapping anything.
-		dtape_stub_safe("anonymous mach_vm_map");
-		return KERN_SUCCESS;
+		return dtape_vm_map_anonymous(target_map, address, initial_size, mask, flags, cur_protection, max_protection);
 	}
 
 	// REAL from here on: only named entries (memfd-backed) are accepted as memory objects

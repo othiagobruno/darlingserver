@@ -54,8 +54,11 @@ mmap path, `Process::mapFile` -> `Thread::mapFile` -> `_mmap`), at
 
 Not implemented / limitations:
 
-- **Stub:** a null memory-object port (anonymous mapping) still returns
-  `KERN_SUCCESS` without mapping anything (unchanged legacy behavior).
+- A null memory-object port maps zero-filled anonymous memory (**real**),
+  allocated through the same remote mmap hook as `mach_vm_allocate`
+  (`task_allocate_pages`) with `cur_protection`. Sizes, alignment, flags and
+  protection checks match the named-entry case (`max_protection` is not
+  checked against an entry, there being none); `offset` is ignored.
 - **Stub:** `copy == TRUE` returns `KERN_NOT_SUPPORTED`; the remote mmap hook
   only does `MAP_SHARED`. Needs a `MAP_PRIVATE` option on the hook.
 - **Stub:** alignment masks larger than a page with `VM_FLAGS_ANYWHERE`
