@@ -558,8 +558,10 @@ static kern_return_t dtape_map_share_range(vm_map_t map, uint64_t start, uint64_
 		dtape_mutex_unlock(&map->shared_entry_lock);
 		return KERN_SUCCESS;
 	} else if (existing_entry_count != 0) {
-		// TODO: handle this case gracefully
-		dtape_stub_unsafe("Cannot complexly remap existing shared regions yet");
+		// TODO: support ranges that are only partially covered by shared entries
+		dtape_mutex_unlock(&map->shared_entry_lock);
+		dtape_stub_safe("Cannot complexly remap existing shared regions yet");
+		return KERN_NOT_SUPPORTED;
 	}
 
 	dtape_mutex_unlock(&map->shared_entry_lock);
