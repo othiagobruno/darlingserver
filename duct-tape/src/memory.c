@@ -169,7 +169,7 @@ static size_t dtape_map_find_shared_entries_locked(dtape_map_t* map, uint64_t ad
 	}
 
 	RB_FOREACH(entry, dtape_map_shared_entry_head, &map->shared_entries) {
-		if (entry->address + entry->size < address || entry->address > address + size) {
+		if (entry->address + entry->size <= address || entry->address >= address + size) {
 			continue;
 		}
 
