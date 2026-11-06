@@ -198,6 +198,14 @@ struct vm_named_entry {
 	/* boolean_t */ internal:1,              /* ... an internal object */
 	/* boolean_t */ is_sub_map:1,           /* ... a submap? */
 	/* boolean_t */ is_copy:1;              /* ... a VM map copy */
+#ifdef __DARLING__
+	/*
+	 * Darling: memfd-backed entry (see duct-tape/src/memory.c). When non-NULL, none of the
+	 * is_* flags above apply and `offset`/`size` describe the window of the memfd
+	 * that this entry exposes. The entry owns one reference on the descriptor.
+	 */
+	struct dtape_map_shared_descriptor* dtape_descriptor;
+#endif // __DARLING__
 #if VM_NAMED_ENTRY_LIST
 	queue_chain_t           named_entry_list;
 	int                     named_entry_alias;
