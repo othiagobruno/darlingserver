@@ -600,13 +600,18 @@ void DarlingServer::Call::FileportMakeport::processCall() {
 	int code = 0;
 	uint32_t name = 0;
 
-	// the descriptor in the request is ours to keep; it is handed to the fileport on success
-	int fd = _body.fd;
-	name = dtape_fileport_makeport(fd);
+	// the request keeps (and later closes) its own descriptor; the fileport owns a duplicate
+	int fd = dup(_body.fd);
 
-	if (name == 0) {
-		close(fd);
-		code = -ENOMEM;
+	if (fd < 0) {
+		code = -errno;
+	} else {
+		name = dtape_fileport_makeport(fd);
+
+		if (name == 0) {
+			close(fd);
+			code = -ENOMEM;
+		}
 	}
 
 	_sendReply(code, name);

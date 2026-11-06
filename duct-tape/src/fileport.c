@@ -65,9 +65,11 @@ int dtape_fileport_makefd(uint32_t port_name) {
 	}
 
 	// the port is locked on success
-	fileport = (struct dtape_fileport*)fileport_port_to_fileglob(port);
-	if (fileport) {
-		fd = dup(fileport->fd);
+	if (ip_active(port) && ip_kotype(port) == IKOT_FILEPORT) {
+		fileport = (struct dtape_fileport*)ip_get_kobject(port);
+		if (fileport) {
+			fd = dup(fileport->fd);
+		}
 	}
 	ip_unlock(port);
 
