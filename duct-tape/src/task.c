@@ -521,7 +521,9 @@ kern_return_t task_info(task_t xtask, task_flavor_t flavor, task_info_t task_inf
 		};
 
 		default:
-			dtape_stub_unsafe("unimplemented flavor");
+			// flavors we don't support are reported to the caller, as task_info() documents,
+			// rather than treated as a fatal server error
+			return KERN_INVALID_ARGUMENT;
 	}
 };
 
