@@ -526,6 +526,120 @@ kern_return_t mach_vm_allocate_kernel(vm_map_t map, mach_vm_offset_t* addr, mach
 	}
 };
 
+/**
+ * Makes the (page-aligned) range `[start, start + map_size)` of `map` memfd-backed shared memory, converting it in place
+ * if it is not already, and returns the backing descriptor (retained; the caller must release it) together with the page
+ * offset into the memfd at which `start` lies. `prot` is the Linux protection the converted mapping is created with.
+ *
+ * Ranges already backed by a single shared entry are reused as they are. Ranges partially covered by shared entries are
+ * not supported yet.
+ */
+static kern_return_t dtape_map_share_range(vm_map_t map, uint64_t start, uint64_t map_size, int prot, dtape_map_shared_descriptor_t** out_descriptor, uint64_t* out_page_offset) {
+	kern_return_t kr = KERN_SUCCESS;
+	int memfd = -1;
+	void* mapped_addr = NULL;
+	dtape_map_shared_descriptor_t* descriptor = NULL;
+	dtape_map_shared_entry_t* shared_entry = NULL;
+	dtape_map_shared_entry_t* existing_entries[8];
+	size_t existing_entry_count = 0;
+	uint64_t page_size = dtape_host_page_size();
+
+	dtape_mutex_lock(&map->shared_entry_lock);
+
+	existing_entry_count = dtape_map_find_shared_entries_locked(map, start, map_size, existing_entries, sizeof(existing_entries) / sizeof(*existing_entries));
+
+	if (existing_entry_count == 1 && existing_entries[0]->address <= start && existing_entries[0]->address + existing_entries[0]->size >= start + map_size) {
+		// the whole range is already backed by one shared entry (this is also what LLDB does with dyld info)
+		dtape_map_shared_descriptor_retain(existing_entries[0]->descriptor);
+		*out_descriptor = existing_entries[0]->descriptor;
+		*out_page_offset = existing_entries[0]->page_offset + (start - existing_entries[0]->address) / page_size;
+		dtape_mutex_unlock(&map->shared_entry_lock);
+		return KERN_SUCCESS;
+	} else if (existing_entry_count != 0) {
+		// TODO: handle this case gracefully
+		dtape_stub_unsafe("Cannot complexly remap existing shared regions yet");
+	}
+
+	dtape_mutex_unlock(&map->shared_entry_lock);
+
+	memfd = memfd_create("darling-remapped", MFD_CLOEXEC);
+	if (memfd < 0) {
+		kr = KERN_RESOURCE_SHORTAGE;
+		goto out;
+	}
+
+	if (ftruncate(memfd, map_size) < 0) {
+		kr = KERN_RESOURCE_SHORTAGE;
+		goto out;
+	}
+
+	mapped_addr = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
+	if (mapped_addr == MAP_FAILED) {
+		mapped_addr = NULL;
+		kr = KERN_RESOURCE_SHORTAGE;
+		goto out;
+	}
+
+	descriptor = dtape_map_shared_descriptor_create(memfd, map_size);
+	if (!descriptor) {
+		kr = KERN_RESOURCE_SHORTAGE;
+		goto out;
+	}
+	memfd = -1; // the descriptor now owns the memfd
+
+	// FIXME: there's a race here between us reading the memory from the source process into the memfd and
+	//        when we actually replace the mapping in the source process with our shared version.
+	//        in that short window, other threads in the source process may be modifying the region
+	//        and any changes they make during that time will be lost when we replace it with our shared version.
+	//
+	//        even if we refactor this code to perform the memfd creation and setup within the source process,
+	//        there would still be a race since we can't actually prevent other threads from accessing that memory.
+
+	kr = copyinmap(map, start, mapped_addr, map_size);
+	if (kr != KERN_SUCCESS) {
+		goto out;
+	}
+
+	if (dtape_hooks->task_map_file(map->dtape_task->context, descriptor->memfd, dtape_byte_count_to_page_count_round_up(map_size), prot, start, 0, dtape_memory_flag_fixed | dtape_memory_flag_overwrite) != start) {
+		kr = KERN_FAILURE;
+		goto out;
+	}
+
+	shared_entry = dtape_map_shared_entry_create(start, map_size, 0, descriptor);
+	if (!shared_entry) {
+		kr = KERN_RESOURCE_SHORTAGE;
+		goto out;
+	}
+
+	dtape_map_insert_shared_entry(map, shared_entry);
+	shared_entry = NULL; // the map now owns the shared entry
+
+	dtape_map_shared_descriptor_retain(descriptor);
+	*out_descriptor = descriptor;
+	*out_page_offset = 0;
+
+out:
+	if (mapped_addr) {
+		if (munmap(mapped_addr, map_size) < 0) {
+			dtape_log_error("failed to unmap memfd");
+		}
+	}
+
+	if (descriptor) {
+		dtape_map_shared_descriptor_release(descriptor);
+	}
+
+	if (shared_entry) {
+		dtape_map_shared_entry_destroy(shared_entry);
+	}
+
+	if (memfd >= 0) {
+		close(memfd);
+	}
+
+	return kr;
+};
+
 // Named memory entries (Darling implementation)
 //
 // REAL: entries created with MAP_MEM_NAMED_CREATE, and sub-entries of such entries (parent_entry), are backed by a
@@ -1161,17 +1275,12 @@ out:
 
 static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_offset_t* address, mach_vm_size_t size, mach_vm_offset_t mask, int flags, vm_map_t src_map, mach_vm_offset_t memory_address, vm_prot_t* cur_protection, vm_prot_t* max_protection, vm_inherit_t inheritance) {
 	kern_return_t kr = KERN_SUCCESS;
-	int memfd = -1;
-	void* mapped_addr = NULL;
 	dtape_memory_region_info_t region_info;
 	int prot = 0;
 	vm_map_address_t target_addr = 0;
 	vm_prot_t vm_prot = VM_PROT_NONE;
 	dtape_map_shared_descriptor_t* descriptor = NULL;
-	dtape_map_shared_entry_t* src_shared_entry = NULL;
 	dtape_map_shared_entry_t* target_shared_entry = NULL;
-	dtape_map_shared_entry_t* src_existing_entries[8];
-	size_t src_existing_entry_count = 0;
 	uint64_t descriptor_page_offset = 0; // page offset into the memfd at which the source range starts
 
 	uintptr_t end_memaddr = mach_vm_round_page(memory_address + size);
@@ -1196,77 +1305,11 @@ static kern_return_t mach_vm_remap_external_shared(vm_map_t target_map, mach_vm_
 		vm_prot |= VM_PROT_EXECUTE;
 	}
 
-	dtape_mutex_lock(&src_map->shared_entry_lock);
-
-	src_existing_entry_count = dtape_map_find_shared_entries_locked(src_map, start_memaddr, map_size, src_existing_entries, sizeof(src_existing_entries) / sizeof(*src_existing_entries));
-
-	if (src_existing_entry_count == 1 && src_existing_entries[0]->address == start_memaddr && src_existing_entries[0]->size >= map_size) {
-		// special case for what LLDB does with dyld info
-		dtape_map_shared_descriptor_retain(src_existing_entries[0]->descriptor);
-		descriptor = src_existing_entries[0]->descriptor;
-		descriptor_page_offset = src_existing_entries[0]->page_offset;
-		dtape_mutex_unlock(&src_map->shared_entry_lock);
-		goto src_setup_done;
-	} else if (src_existing_entry_count != 0) {
-		// TODO: handle this case gracefully
-		dtape_stub_unsafe("Cannot complexly remap existing shared regions yet");
-	}
-
-	dtape_mutex_unlock(&src_map->shared_entry_lock);
-
-	memfd = memfd_create("darling-remapped", MFD_CLOEXEC);
-	if (memfd < 0) {
-		kr = KERN_RESOURCE_SHORTAGE;
-		goto out;
-	}
-
-	if (ftruncate(memfd, map_size) < 0) {
-		kr = KERN_RESOURCE_SHORTAGE;
-		goto out;
-	}
-
-	mapped_addr = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0);
-	if (mapped_addr == MAP_FAILED) {
-		mapped_addr = NULL;
-		kr = KERN_RESOURCE_SHORTAGE;
-		goto out;
-	}
-
-	descriptor = dtape_map_shared_descriptor_create(memfd, map_size);
-	if (!descriptor) {
-		kr = KERN_RESOURCE_SHORTAGE;
-		goto out;
-	}
-	memfd = -1; // the descriptor now owns the memfd
-
-	// FIXME: there's a race here between us reading the memory from the source process into the memfd and
-	//        when we actually replace the mapping in the source process with our shared version.
-	//        in that short window, other threads in the source process may be modifying the region
-	//        and any changes they make during that time will be lost when we replace it with our shared version.
-	//
-	//        even if we refactor this code to perform the memfd creation and setup within the source process,
-	//        there would still be a race since we can't actually prevent other threads from accessing that memory.
-
-	kr = copyinmap(src_map, start_memaddr, mapped_addr, map_size);
+	kr = dtape_map_share_range(src_map, start_memaddr, map_size, prot, &descriptor, &descriptor_page_offset);
 	if (kr != KERN_SUCCESS) {
 		goto out;
 	}
 
-	if (dtape_hooks->task_map_file(src_map->dtape_task->context, descriptor->memfd, dtape_byte_count_to_page_count_round_up(map_size), prot, start_memaddr, 0, dtape_memory_flag_fixed | dtape_memory_flag_overwrite) != start_memaddr) {
-		kr = KERN_FAILURE;
-		goto out;
-	}
-
-	src_shared_entry = dtape_map_shared_entry_create(start_memaddr, map_size, 0, descriptor);
-	if (!src_shared_entry) {
-		kr = KERN_RESOURCE_SHORTAGE;
-		goto out;
-	}
-
-	dtape_map_insert_shared_entry(src_map, src_shared_entry);
-	src_shared_entry = NULL; // the map now owns the shared entry
-
-src_setup_done:
 	target_addr = dtape_hooks->task_map_file(target_map->dtape_task->context, descriptor->memfd, dtape_byte_count_to_page_count_round_up(map_size), prot, 0, descriptor_page_offset, dtape_memory_flag_none);
 	if (!target_addr) {
 		kr = KERN_FAILURE;
@@ -1291,26 +1334,12 @@ src_setup_done:
 	}
 
 out:
-	if (mapped_addr) {
-		if (munmap(mapped_addr, map_size) < 0) {
-			dtape_log_error("failed to unmap memfd");
-		}
-	}
-
 	if (descriptor) {
 		dtape_map_shared_descriptor_release(descriptor);
 	}
 
-	if (src_shared_entry) {
-		dtape_map_shared_entry_destroy(src_shared_entry);
-	}
-
 	if (target_shared_entry) {
 		dtape_map_shared_entry_destroy(target_shared_entry);
-	}
-
-	if (memfd >= 0) {
-		close(memfd);
 	}
 
 	return kr;
