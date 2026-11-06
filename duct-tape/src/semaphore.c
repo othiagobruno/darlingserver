@@ -43,6 +43,8 @@ dtape_semaphore_wait_result_t dtape_semaphore_down(dtape_semaphore_t* semaphore)
 			return dtape_semaphore_wait_result_ok;
 		case KERN_ABORTED:
 			return dtape_semaphore_wait_result_interrupted;
+		case KERN_TERMINATED:
+			return dtape_semaphore_wait_result_terminated;
 		default:
 			return dtape_semaphore_wait_result_error;
 	}
@@ -53,6 +55,10 @@ bool dtape_semaphore_down_simple(dtape_semaphore_t* semaphore) {
 		case dtape_semaphore_wait_result_ok:
 			return true;
 		case dtape_semaphore_wait_result_interrupted:
+			// fallthrough
+		case dtape_semaphore_wait_result_terminated:
+			// the semaphore's owner is going away (e.g. a thread being torn down while a call
+			// waits on it); callers treat this like an interruption and back out
 			return false;
 		default:
 			panic("Failed to lower up-count of duct-taped XNU semaphore");

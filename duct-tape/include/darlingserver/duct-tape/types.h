@@ -23,6 +23,10 @@ typedef enum dtape_log_level {
 
 typedef enum dtape_semaphore_wait_result {
 	dtape_semaphore_wait_result_error = -1,
+	/**
+	 * The semaphore was destroyed (or its task is being torn down) while waiting.
+	 */
+	dtape_semaphore_wait_result_terminated = -2,
 	dtape_semaphore_wait_result_ok = 0,
 	dtape_semaphore_wait_result_interrupted = 1,
 } dtape_semaphore_wait_result_t;
