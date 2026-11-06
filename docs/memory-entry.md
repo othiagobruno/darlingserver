@@ -28,8 +28,8 @@ Lifetime:
 |---|---|
 | `MAP_MEM_NAMED_CREATE` | **Real.** `memfd_create` + `ftruncate` to the size rounded up to the host page size; `*size` is updated to the rounded size. `offset` is ignored. Cache mode, `MAP_MEM_PURGABLE*`, and `MAP_MEM_GRAB_SECLUDED` are accepted and ignored. |
 | `parent_entry` set (sub-entry) | **Real.** Window into the parent's memfd. Start is truncated and end rounded to pages. Requested protection must be a subset of the parent's (`KERN_INVALID_RIGHT` otherwise); the range must lie inside the parent (`KERN_INVALID_ARGUMENT`). |
-| Wrapping an existing range of `target_map` | **Stub** (`KERN_NOT_SUPPORTED`). |
-| `MAP_MEM_ONLY`, `NAMED_REUSE`, `VM_COPY`, `VM_SHARE`, `USE_DATA_ADDR`, `4K_DATA_ADDR`, `LEDGER_TAGGED` | **Stub** (`KERN_NOT_SUPPORTED`). |
+| Wrapping an existing range of `target_map` (no flags, or `MAP_MEM_VM_SHARE`) | **Real.** The range is converted in place to memfd-backed shared memory (contents copied, mapping replaced; or the shared entry already covering it is reused) and the entry exposes that window, so mappings of the entry share pages with the original. Requested protection must be a subset of the range's (`KERN_PROTECTION_FAILURE` otherwise). Same race as `vm_remap`: writes by other threads during the conversion can be lost. Ranges partially covered by shared entries are unsupported. |
+| `MAP_MEM_ONLY`, `NAMED_REUSE`, `VM_COPY`, `USE_DATA_ADDR`, `4K_DATA_ADDR`, `LEDGER_TAGGED` | **Stub** (`KERN_NOT_SUPPORTED`). |
 
 Open question: a zero-sized `NAMED_CREATE` currently fails with
 `KERN_INVALID_ARGUMENT`. Whether the original returns success with a null

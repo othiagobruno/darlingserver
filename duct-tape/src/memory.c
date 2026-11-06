@@ -526,6 +526,8 @@ kern_return_t mach_vm_allocate_kernel(vm_map_t map, mach_vm_offset_t* addr, mach
 	}
 };
 
+static uint64_t dtape_host_page_size(void);
+
 /**
  * Makes the (page-aligned) range `[start, start + map_size)` of `map` memfd-backed shared memory, converting it in place
  * if it is not already, and returns the backing descriptor (retained; the caller must release it) together with the page
@@ -645,11 +647,12 @@ out:
 // REAL: entries created with MAP_MEM_NAMED_CREATE, and sub-entries of such entries (parent_entry), are backed by a
 //       Linux memfd. The memfd is wrapped in the same refcounted `dtape_map_shared_descriptor_t` that
 //       `mach_vm_remap_external_shared` uses, so mappings created from an entry keep the memfd alive on their own.
-// STUB: entries that wrap an existing range of a task's address space (no NAMED_CREATE, no parent) and the
-//       MAP_MEM_* flags that only make sense for them are not supported (KERN_NOT_SUPPORTED).
+// REAL: entries that wrap an existing range of a task's address space (no NAMED_CREATE, no parent) convert that range
+//       to memfd-backed shared memory in place.
+// STUB: the MAP_MEM_* flags other than VM_SHARE that only make sense for such entries (KERN_NOT_SUPPORTED).
 // See docs/memory-entry.md.
 
-#define DTAPE_NAMED_ENTRY_UNSUPPORTED_FLAGS (MAP_MEM_ONLY | MAP_MEM_NAMED_REUSE | MAP_MEM_VM_COPY | MAP_MEM_VM_SHARE | MAP_MEM_USE_DATA_ADDR | MAP_MEM_4K_DATA_ADDR | MAP_MEM_LEDGER_TAGGED)
+#define DTAPE_NAMED_ENTRY_UNSUPPORTED_FLAGS (MAP_MEM_ONLY | MAP_MEM_NAMED_REUSE | MAP_MEM_VM_COPY | MAP_MEM_USE_DATA_ADDR | MAP_MEM_4K_DATA_ADDR | MAP_MEM_LEDGER_TAGGED)
 
 static uint64_t dtape_host_page_size(void) {
 	return sysconf(_SC_PAGESIZE);
@@ -837,10 +840,59 @@ kern_return_t _mach_make_memory_entry(vm_map_t target_map, memory_object_size_t*
 		goto out;
 	}
 
-	// STUB: wrapping an existing range of `target_map` would require converting that range to memfd-backed shared memory
-	//       in place (what `mach_vm_remap_external_shared` does for remapping); not wired up for named entries yet.
-	dtape_stub_safe("named entries for existing address ranges");
-	kr = KERN_NOT_SUPPORTED;
+	{
+		// wrapping an existing range of `target_map` (with or without MAP_MEM_VM_SHARE): the range is converted to
+		// memfd-backed shared memory in place (or its existing backing is reused) and the entry exposes that window,
+		// so mappings made from the entry share pages with the original mapping.
+		dtape_memory_region_info_t region_info;
+		vm_prot_t region_protection = VM_PROT_NONE;
+		int linux_prot = 0;
+		uint64_t page_offset = 0;
+
+		if (*size == 0 || offset + *size < offset) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		if (!target_map || !dtape_hooks->task_get_memory_region_info(target_map->dtape_task->context, offset, &region_info)) {
+			return KERN_INVALID_ADDRESS;
+		}
+
+		if (region_info.protection & dtape_memory_protection_read) {
+			region_protection |= VM_PROT_READ;
+		}
+		if (region_info.protection & dtape_memory_protection_write) {
+			region_protection |= VM_PROT_WRITE;
+		}
+		if (region_info.protection & dtape_memory_protection_execute) {
+			region_protection |= VM_PROT_EXECUTE;
+		}
+		linux_prot = dtape_vm_prot_to_linux(region_protection);
+
+		if (protection == VM_PROT_NONE) {
+			protection = region_protection;
+		}
+
+		if ((protection & region_protection) != protection) {
+			return KERN_PROTECTION_FAILURE;
+		}
+
+		map_start = offset & ~page_mask;
+		map_size = ((offset + *size + page_mask) & ~page_mask) - map_start;
+
+		kr = dtape_map_share_range(target_map, map_start, map_size, linux_prot, &descriptor, &page_offset);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+
+		port = dtape_named_entry_create_port(descriptor, page_offset * page_size, map_size, protection);
+		if (!IP_VALID(port)) {
+			kr = KERN_RESOURCE_SHORTAGE;
+			goto out;
+		}
+
+		*size = map_size;
+		*object_handle = port;
+	}
 
 out:
 	if (descriptor) {
