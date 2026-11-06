@@ -627,14 +627,14 @@ void DarlingServer::Process::freePages(uintptr_t address, size_t pageCount) {
 	return thread->freePages(address, pageCount);
 };
 
-uintptr_t DarlingServer::Process::mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite) {
+uintptr_t DarlingServer::Process::mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite, bool privateMapping) {
 	auto thread = _pickS2CThread();
 
 	if (!thread) {
 		throw std::system_error(ESRCH, std::generic_category());
 	}
 
-	return thread->mapFile(fd, pageCount, protection, addressHint, pageOffset, fixed, overwrite);
+	return thread->mapFile(fd, pageCount, protection, addressHint, pageOffset, fixed, overwrite, privateMapping);
 };
 
 void DarlingServer::Process::changeProtection(uintptr_t address, size_t pageCount, int protection) {

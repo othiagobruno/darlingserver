@@ -893,13 +893,6 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 		goto out;
 	}
 
-	if (copy) {
-		// STUB: copy-on-write (copy == TRUE) mappings of a named entry would need MAP_PRIVATE support in the remote mmap hook
-		dtape_stub_safe("copy mapping of named entry");
-		kr = KERN_NOT_SUPPORTED;
-		goto out;
-	}
-
 	if (!fixed && (mask & ~page_mask) != 0) {
 		// alignment beyond a page can't be requested from the remote mmap
 		dtape_stub_safe("alignment mask larger than a page");
@@ -914,7 +907,12 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 		}
 	}
 
-	// `inheritance` is not applied: the mapping is MAP_SHARED, so it is shared with children after a fork.
+	if (copy) {
+		// a private copy: writes stay local to the mapping and are never visible through the entry
+		memflags |= dtape_memory_flag_private;
+	}
+
+	// `inheritance` is not applied: a shared mapping is shared with children after a fork, a private one is copied.
 	result = dtape_hooks->task_map_file(target_map->dtape_task->context, descriptor->memfd, map_size / page_size, dtape_vm_prot_to_linux(cur_protection), fixed ? *address : 0, (entry_offset + offset) / page_size, memflags);
 	if (!result) {
 		// the hook doesn't report errno, so a fixed mapping that collides with an existing one can't be told apart from other failures
@@ -922,10 +920,13 @@ kern_return_t mach_vm_map_external(vm_map_t target_map, mach_vm_offset_t* addres
 		goto out;
 	}
 
-	// register the mapping like `mach_vm_remap_external_shared` does; failure to do so is not fatal for the mapping itself
-	shared_entry = dtape_map_shared_entry_create(result, map_size, (entry_offset + offset) / page_size, descriptor);
-	if (shared_entry) {
-		dtape_map_insert_shared_entry(target_map, shared_entry);
+	// register the mapping like `mach_vm_remap_external_shared` does; failure to do so is not fatal for the mapping itself.
+	// private (copy) mappings don't share memory with the entry, so a later vm_remap must not treat them as shared.
+	if (!copy) {
+		shared_entry = dtape_map_shared_entry_create(result, map_size, (entry_offset + offset) / page_size, descriptor);
+		if (shared_entry) {
+			dtape_map_insert_shared_entry(target_map, shared_entry);
+		}
 	}
 
 	*address = result;

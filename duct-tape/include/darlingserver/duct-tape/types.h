@@ -55,6 +55,8 @@ typedef enum dtape_memory_flags {
 	dtape_memory_flag_none = 0,
 	dtape_memory_flag_fixed = 1ULL << 0,
 	dtape_memory_flag_overwrite = 1ULL << 1,
+	// only meaningful for file mappings: map privately (copy-on-write) rather than shared
+	dtape_memory_flag_private = 1ULL << 2,
 } dtape_memory_flags_t;
 
 #if DSERVER_EXTENDED_DEBUG

@@ -1274,9 +1274,9 @@ void DarlingServer::Thread::freePages(uintptr_t address, size_t pageCount) {
 	}
 };
 
-uintptr_t DarlingServer::Thread::mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite) {
+uintptr_t DarlingServer::Thread::mapFile(int fd, size_t pageCount, int protection, uintptr_t addressHint, size_t pageOffset, bool fixed, bool overwrite, bool privateMapping) {
 	int err = 0;
-	int flags = MAP_SHARED;
+	int flags = privateMapping ? MAP_PRIVATE : MAP_SHARED;
 	if (fixed && overwrite) {
 		flags |= MAP_FIXED;
 	} else if (fixed) {

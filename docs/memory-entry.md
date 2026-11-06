@@ -37,7 +37,8 @@ handle is not established and needs black-box confirmation.
 
 ## `mach_vm_map_external`
 
-Mapping a named entry is **real**: the memfd is mapped `MAP_SHARED` into the
+Mapping a named entry is **real**: the memfd is mapped `MAP_SHARED` (or
+`MAP_PRIVATE` when `copy` is set) into the
 target process through the existing `task_map_file` hook (the server-to-client
 mmap path, `Process::mapFile` -> `Thread::mapFile` -> `_mmap`), at
 `entry offset + offset`.
@@ -59,8 +60,13 @@ Not implemented / limitations:
   (`task_allocate_pages`) with `cur_protection`. Sizes, alignment, flags and
   protection checks match the named-entry case (`max_protection` is not
   checked against an entry, there being none); `offset` is ignored.
-- **Stub:** `copy == TRUE` returns `KERN_NOT_SUPPORTED`; the remote mmap hook
-  only does `MAP_SHARED`. Needs a `MAP_PRIVATE` option on the hook.
+- `copy == TRUE` maps the range privately (**real**): the memfd is mapped
+  `MAP_PRIVATE` through `task_map_file` (`dtape_memory_flag_private`), so writes
+  stay local to the mapping and never reach the entry. Private mappings are not
+  registered as shared regions, so `vm_remap` does not treat them as sharing
+  the entry's memory. Limitation: this is Linux copy-on-write, not a snapshot;
+  pages the mapping has not written yet may reflect later writes made to the
+  entry through other mappings.
 - **Stub:** alignment masks larger than a page with `VM_FLAGS_ANYWHERE`
   return `KERN_NOT_SUPPORTED`; the remote mmap cannot request alignment.
 - `inheritance` is not applied (shared mappings are inherited shared on fork).
@@ -79,4 +85,5 @@ Based on the public Mach VM API contract (`mach_make_memory_entry_64`,
 `mach_vm_map`, `<mach/memory_object_types.h>`, `<mach/vm_prot.h>`), the
 already-vendored XNU headers/open-source VM code in this tree, and Linux
 `memfd_create(2)` / `mmap(2)`. No disassembly, backtraces, or restricted
-sources were used. Nothing was built or run; this change is untested.
+sources were used. The code compiles as part of the Darling build; it has not
+been exercised at runtime.
